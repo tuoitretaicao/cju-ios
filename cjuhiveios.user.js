@@ -2,7 +2,7 @@
 // @name         CJU HIVE (Bản Quyền)
 // @namespace    cju-hive-helper
 // @version      1.1
-// @description  Tool CJU HIVE tương thích iOS & Desktop
+// @description  Tool CJU HIVE
 // @author       Assistant
 // @match        *://hive.cju.ac.kr/*
 // @connect      *
