@@ -26,7 +26,7 @@
 
     console.log('[CJU] Script bắt đầu chạy (iOS & Desktop Ready)');
 
-    const _encodedUrl = "aHR0cHM6Ly9janVrZXkuaGFpdnUxMDI0LndvcmtlcnMuZGV2";
+    const _encodedUrl = "aHR0cHM6Ly9janVoaXZlaW9zLmhhaXZ1MTAyNC53b3JrZXJzLmRldg==";
     const SERVER_URL = atob(_encodedUrl);
     const url = window.location.href;
     const pageWin = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
@@ -39,7 +39,7 @@
         return;
     }
 
-    // Hỗ trợ lưu Device ID đa nền tảng (Tampermonkey + iOS Userscripts)
+    //
     function getDeviceId() {
         let id = "";
         try {
@@ -79,7 +79,7 @@
         }
     }
 
-    // Đăng ký menu trên Desktop Tampermonkey
+    //
     if (typeof GM_registerMenuCommand === 'function') {
         try {
             GM_registerMenuCommand("🔑 Nhập / Đổi Key CJU HIVE", promptChangeKey);
@@ -88,7 +88,7 @@
 
     const isMainPage = url.includes('/classroom/main.do');
 
-    // Tạo nút nổi đổi Key trên màn hình (Dành cho iPhone không có Menu Tampermonkey)
+    //
     if (isMainPage && window.top === window.self) {
         const keyBtn = document.createElement('button');
         keyBtn.innerText = '🔑 Key';
@@ -178,7 +178,7 @@
         "x-device-id": deviceId
     };
 
-    // Ưu tiên GM_xmlhttpRequest / GM.xmlHttpRequest, tự động chuyển sang fetch() nếu chạy trên Safari iOS thiếu API
+    //
     const gmXhr = (typeof GM_xmlhttpRequest === 'function') ? GM_xmlhttpRequest :
                   (typeof GM !== 'undefined' && typeof GM.xmlHttpRequest === 'function') ? GM.xmlHttpRequest : null;
 
