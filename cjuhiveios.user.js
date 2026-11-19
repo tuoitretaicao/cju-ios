@@ -89,13 +89,6 @@
     const isMainPage = url.includes('/classroom/main.do');
 
     //
-    if (isMainPage && window.top === window.self) {
-        const keyBtn = document.createElement('button');
-        keyBtn.innerText = '🔑 Key';
-        keyBtn.style.cssText = 'position:fixed;bottom:15px;left:15px;z-index:999999;padding:6px 12px;background:#1e293b;color:#fff;border:1px solid #475569;border-radius:8px;font-size:12px;opacity:0.85;box-shadow:0 2px 6px rgba(0,0,0,0.3);cursor:pointer;';
-        keyBtn.onclick = promptChangeKey;
-        document.body.appendChild(keyBtn);
-    }
 
     let activeKey = "";
 
