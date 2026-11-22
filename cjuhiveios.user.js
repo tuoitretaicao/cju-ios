@@ -1,13 +1,17 @@
 // ==UserScript==
 // @name         CJU HIVE iOS
 // @namespace    cju-hive-ios-thin
-// @version      1.0
+// @version      1.1
 // @match        https://hive.cju.ac.kr/*
 // @connect      cjuhiveios.haivu1024.workers.dev
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_deleteValue
+// @grant        GM.xmlHttpRequest
+// @grant        GM.setValue
+// @grant        GM.getValue
+// @grant        GM.deleteValue
 // @grant        unsafeWindow
 // @run-at       document-end
 // ==/UserScript==
@@ -21,8 +25,6 @@
 
   var SERVER_URL = "https://cjuhiveios.haivu1024.workers.dev";
   var isTopFrame = (window.top === window.self);
-
-  // Chỉ chạy ở frame cha (tránh trùng lặp với iframe con)
   if (!isTopFrame) return;
 
   window.addEventListener("pageshow", function (e) {
@@ -38,13 +40,64 @@
     } catch (e) {}
   }
 
-  // Chỉ ghi đè alert/confirm khi đã xác thực thành công và vào đúng trang main/player
   var realAlert = typeof pageWin.alert === "function" ? pageWin.alert.bind(pageWin) : window.alert.bind(window);
-  function enableAlertBypass() {
+
+  function applyServerHook(hookCode) {
+    if (!hookCode || typeof hookCode !== "string") return;
     try {
-      pageWin.alert = function () { return true; };
-      pageWin.confirm = function () { return true; };
+      var s = document.createElement("script");
+      s.textContent = hookCode;
+      (document.head || document.documentElement).appendChild(s);
+      s.remove();
     } catch (e) {}
+  }
+
+  // Lưu trữ an toàn tương thích mọi app Userscript iOS (Userscripts, Stay, Tampermonkey)
+  async function storeGet(key) {
+    try {
+      if (typeof GM_getValue === "function") {
+        var v1 = GM_getValue(key, "");
+        if (v1 && typeof v1.then === "function") v1 = await v1;
+        if (v1 !== undefined && v1 !== null && v1 !== "") return String(v1);
+      } else if (typeof GM !== "undefined" && GM && typeof GM.getValue === "function") {
+        var v2 = await GM.getValue(key, "");
+        if (v2 !== undefined && v2 !== null && v2 !== "") return String(v2);
+      }
+    } catch (e) {}
+    try {
+      return localStorage.getItem(key) || "";
+    } catch (e) {
+      return "";
+    }
+  }
+
+  async function storeSet(key, val) {
+    var wroteGm = false;
+    try {
+      if (typeof GM_setValue === "function") {
+        var r1 = GM_setValue(key, String(val));
+        if (r1 && typeof r1.then === "function") await r1;
+        wroteGm = true;
+      } else if (typeof GM !== "undefined" && GM && typeof GM.setValue === "function") {
+        await GM.setValue(key, String(val));
+        wroteGm = true;
+      }
+    } catch (e) {}
+    if (!wroteGm) {
+      try { localStorage.setItem(key, String(val)); } catch (e) {}
+    }
+  }
+
+  async function storeDel(key) {
+    try {
+      if (typeof GM_deleteValue === "function") {
+        var r1 = GM_deleteValue(key);
+        if (r1 && typeof r1.then === "function") await r1;
+      } else if (typeof GM !== "undefined" && GM && typeof GM.deleteValue === "function") {
+        await GM.deleteValue(key);
+      }
+    } catch (e) {}
+    try { localStorage.removeItem(key); } catch (e) {}
   }
 
   function collectIOSEnv() {
@@ -63,8 +116,8 @@
     };
   }
 
-  function getOrCreateDeviceId() {
-    var id = GM_getValue("CJU_IOS_DEV_ID", "");
+  async function getOrCreateDeviceId() {
+    var id = await storeGet("CJU_IOS_DEV_ID");
     if (!/^DEV-[A-Z0-9-]{8,48}$/.test(id)) {
       var bytes = new Uint8Array(8);
       crypto.getRandomValues(bytes);
@@ -73,79 +126,136 @@
         hex += bytes[i].toString(16).padStart(2, "0");
       }
       id = "DEV-" + hex.toUpperCase();
-      GM_setValue("CJU_IOS_DEV_ID", id);
+      await storeSet("CJU_IOS_DEV_ID", id);
     }
     return id;
   }
 
-  function getSession() {
+  async function getSession() {
     try {
-      var raw = GM_getValue("CJU_IOS_SESS", "");
+      var raw = await storeGet("CJU_IOS_SESS");
       return raw ? JSON.parse(raw) : null;
     } catch (e) {
       return null;
     }
   }
 
-  function saveSession(sess) {
-    GM_setValue("CJU_IOS_SESS", JSON.stringify(sess));
+  async function saveSession(sess) {
+    await storeSet("CJU_IOS_SESS", JSON.stringify(sess));
   }
 
-  function clearSession() {
-    GM_deleteValue("CJU_IOS_SESS");
+  async function clearSession() {
+    await storeDel("CJU_IOS_SESS");
   }
 
-  function apiPost(path, body, accessToken) {
+  // Gọi API: Ưu tiên fetch() gốc của Safari (nhanh, chuẩn UA iOS), tự dự phòng GM_xmlhttpRequest
+  function gmPostFallback(url, headers, bodyStr) {
     return new Promise(function (resolve) {
-      var headers = { "Content-Type": "application/json" };
-      if (accessToken) headers["Authorization"] = "Bearer " + accessToken;
+      var gmXhr = typeof GM_xmlhttpRequest === "function"
+        ? GM_xmlhttpRequest
+        : (typeof GM !== "undefined" && GM && typeof GM.xmlHttpRequest === "function" ? GM.xmlHttpRequest : null);
 
-      GM_xmlhttpRequest({
-        method: "POST",
-        url: SERVER_URL + path,
-        headers: headers,
-        data: JSON.stringify(body || {}),
-        timeout: 15000,
-        onload: function (res) {
-          var data = null;
-          try {
-            data = JSON.parse(res.responseText);
-          } catch (e) {
-            data = { ok: false, message: "Phản hồi không hợp lệ." };
+      if (!gmXhr) {
+        resolve({ status: 0, data: { ok: false, message: "Không thể kết nối máy chủ." } });
+        return;
+      }
+
+      var settled = false;
+      function done(result) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(result);
+      }
+
+      var timer = setTimeout(function () {
+        done({ status: 0, data: { ok: false, message: "Hết thời gian chờ máy chủ." } });
+      }, 10000);
+
+      try {
+        gmXhr({
+          method: "POST",
+          url: url,
+          headers: headers,
+          data: bodyStr,
+          timeout: 10000,
+          onload: function (res) {
+            var data = null;
+            try { data = JSON.parse(res.responseText); } catch (e) {
+              data = { ok: false, message: "Phản hồi không hợp lệ." };
+            }
+            done({ status: res.status || 0, data: data });
+          },
+          onerror: function () {
+            done({ status: 0, data: { ok: false, message: "Lỗi mạng khi gọi máy chủ." } });
+          },
+          ontimeout: function () {
+            done({ status: 0, data: { ok: false, message: "Quá thời gian kết nối." } });
           }
-          resolve({ status: res.status, data: data });
-        },
-        onerror: function () {
-          resolve({ status: 0, data: { ok: false, message: "Không thể kết nối máy chủ." } });
-        },
-        ontimeout: function () {
-          resolve({ status: 0, data: { ok: false, message: "Quá thời gian kết nối." } });
-        }
-      });
+        });
+      } catch (e) {
+        done({ status: 0, data: { ok: false, message: "Lỗi kết nối: " + (e && e.message ? e.message : "unknown") } });
+      }
     });
+  }
+
+  async function apiPost(path, body, accessToken) {
+    var fullUrl = SERVER_URL + path;
+    var headers = { "Content-Type": "application/json" };
+    if (accessToken) headers["Authorization"] = "Bearer " + accessToken;
+    var bodyStr = JSON.stringify(body || {});
+
+    try {
+      var controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+      var timer = controller ? setTimeout(function () { controller.abort(); }, 10000) : null;
+      var res = await fetch(fullUrl, {
+        method: "POST",
+        headers: headers,
+        body: bodyStr,
+        mode: "cors",
+        cache: "no-store",
+        signal: controller ? controller.signal : undefined
+      });
+      if (timer) clearTimeout(timer);
+
+      var data = null;
+      try {
+        data = await res.json();
+      } catch (e) {
+        data = { ok: false, message: "Phản hồi máy chủ không hợp lệ (HTTP " + res.status + ")." };
+      }
+      return { status: res.status, data: data };
+    } catch (fetchErr) {
+      return await gmPostFallback(fullUrl, headers, bodyStr);
+    }
   }
 
   async function activateKey(licenseKey) {
-    var res = await apiPost("/api/v1/auth/activate", {
-      licenseKey: String(licenseKey || "").trim(),
-      deviceId: getOrCreateDeviceId(),
-      env: collectIOSEnv()
-    }, null);
+    try {
+      var deviceId = await getOrCreateDeviceId();
+      var res = await apiPost("/api/v1/auth/activate", {
+        licenseKey: String(licenseKey || "").trim(),
+        deviceId: deviceId,
+        env: collectIOSEnv()
+      }, null);
 
-    if (res.status !== 200 || !res.data.ok) {
-      return { ok: false, message: (res.data && res.data.message) || "Kích hoạt thất bại." };
+      if (res.status !== 200 || !res.data || !res.data.ok) {
+        return { ok: false, message: (res.data && res.data.message) || ("Kích hoạt thất bại (" + res.status + ").") };
+      }
+      await saveSession({
+        accessToken: res.data.accessToken,
+        refreshToken: res.data.refreshToken,
+        sessionId: res.data.sessionId,
+        accessExpAt: Date.now() + (res.data.expiresIn - 30) * 1000
+      });
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, message: "Lỗi xử lý: " + (err && err.message ? err.message : "unknown") };
     }
-    saveSession({
-      accessToken: res.data.accessToken,
-      refreshToken: res.data.refreshToken,
-      sessionId: res.data.sessionId,
-      accessExpAt: Date.now() + (res.data.expiresIn - 30) * 1000
-    });
-    return { ok: true };
   }
 
   async function ensureToken() {
-    var sess = getSession();
+    var sess = await getSession();
     if (!sess || !sess.accessToken || !sess.refreshToken || !sess.sessionId) {
       return { ok: false, authFailed: true, message: "Chưa kích hoạt Key." };
     }
@@ -153,15 +263,16 @@
       return { ok: true, accessToken: sess.accessToken };
     }
 
+    var deviceId = await getOrCreateDeviceId();
     var res = await apiPost("/api/v1/auth/refresh", {
       sessionId: sess.sessionId,
       refreshToken: sess.refreshToken,
-      deviceId: getOrCreateDeviceId(),
+      deviceId: deviceId,
       env: collectIOSEnv()
     }, null);
 
-    if (res.status !== 200 || !res.data.ok) {
-      if (res.status === 401 || res.status === 403) clearSession();
+    if (res.status !== 200 || !res.data || !res.data.ok) {
+      if (res.status === 401 || res.status === 403) await clearSession();
       return {
         ok: false,
         authFailed: res.status === 401 || res.status === 403,
@@ -169,7 +280,7 @@
       };
     }
 
-    saveSession({
+    await saveSession({
       accessToken: res.data.accessToken,
       refreshToken: res.data.refreshToken,
       sessionId: sess.sessionId,
@@ -184,10 +295,10 @@
 
     var res = await apiPost(path, payload, tok.accessToken);
     if (res.status === 401 && res.data && res.data.code === "INVALID_TOKEN") {
-      var cur = getSession();
+      var cur = await getSession();
       if (cur) {
         cur.accessExpAt = 0;
-        saveSession(cur);
+        await saveSession(cur);
         tok = await ensureToken();
         if (!tok.ok) return tok;
         res = await apiPost(path, payload, tok.accessToken);
@@ -195,10 +306,10 @@
     }
 
     if (res.status === 401 || res.status === 403) {
-      clearSession();
+      await clearSession();
       return { ok: false, authFailed: true, message: (res.data && res.data.message) || "Phiên đã hết hạn." };
     }
-    if (res.status !== 200 || !res.data.ok) {
+    if (res.status !== 200 || !res.data || !res.data.ok) {
       return { ok: false, code: res.data && res.data.code, message: (res.data && res.data.message) || "Lỗi máy chủ." };
     }
     return res.data;
@@ -294,7 +405,7 @@
       "border-radius:4px;font-size:10px;font-weight:700;touch-action:manipulation;";
 
     var keyMsg = document.createElement("div");
-    keyMsg.style.cssText = "display:none;font-size:9.5px;color:#dc2626;line-height:1.25;";
+    keyMsg.style.cssText = "display:none;font-size:9.5px;color:#dc2626;line-height:1.25;word-break:break-word;";
 
     inputRow.appendChild(keyInput);
     inputRow.appendChild(saveBtn);
@@ -307,16 +418,28 @@
 
     async function doSave() {
       var val = keyInput.value.trim();
-      if (!val) return;
+      if (!val) {
+        keyMsg.textContent = "Vui lòng nhập Key!";
+        keyMsg.style.display = "block";
+        return;
+      }
       saveBtn.disabled = true;
       saveBtn.textContent = "...";
       keyMsg.style.display = "none";
-      var res = await handlers.onActivateKey(val);
-      if (res && res.ok) {
-        location.reload();
-      } else {
+
+      try {
+        var res = await handlers.onActivateKey(val);
+        if (res && res.ok) {
+          statusEl.textContent = "✅ Đang tải lại...";
+          location.reload();
+          return;
+        }
         keyMsg.textContent = (res && res.message) || "Key không hợp lệ!";
         keyMsg.style.display = "block";
+      } catch (e) {
+        keyMsg.textContent = "Lỗi: " + (e && e.message ? e.message : "Không xác định");
+        keyMsg.style.display = "block";
+      } finally {
         saveBtn.disabled = false;
         saveBtn.textContent = "Lưu";
       }
@@ -391,7 +514,6 @@
 
   function runMainMode(recipe) {
     if (!recipe || !recipe.btnText || !recipe.cardKey) return;
-    enableAlertBypass();
     try { localStorage.setItem("cju_main_page_url", window.location.href); } catch (e) {}
 
     if (recipe.forceSameTab) {
@@ -519,11 +641,14 @@
   }
 
   function runPlayerMode(playToken, dir) {
-    if (!playToken || !dir || !dir.vSel || !dir.dlgSel || !dir.actSel || !Array.isArray(dir.labels)) {
+    if (!playToken || !dir || !dir.vSel || !dir.actSel || !Array.isArray(dir.labels)) {
       return;
     }
 
-    enableAlertBypass();
+    if (dir.pageHook) {
+      applyServerHook(dir.pageHook);
+    }
+
     requestWakeLock();
     document.addEventListener("visibilitychange", function () {
       if (!document.hidden) requestWakeLock();
@@ -551,6 +676,7 @@
           var el = els[i];
           if (el.offsetParent === null) continue;
           var txt = (el.innerText || el.value || "").trim();
+          if (!txt || txt.length > 24) continue;
           var hit = false;
           for (var w = 0; w < dir.labels.length; w++) {
             var kw = dir.labels[w];
@@ -559,7 +685,7 @@
               break;
             }
           }
-          if (hit && el.closest(dir.dlgSel)) {
+          if (hit) {
             try { el.click(); } catch (e) {}
           }
         }
@@ -645,7 +771,7 @@
   }
 
   async function boot() {
-    var sess = getSession();
+    var sess = await getSession();
     if (!sess) {
       if (location.pathname.indexOf("/classroom/") !== -1) {
         var loginUi = buildIOSWidget({
@@ -659,6 +785,15 @@
         }
       }
       return;
+    }
+
+    if (location.pathname.indexOf("/classroom/main.do") !== -1 && localStorage.getItem("cju_auto_enabled") !== "false") {
+      var hookRes = await authorizedCall("/api/v1/session/main-hook", {
+        pathname: location.pathname
+      });
+      if (hookRes && hookRes.ok && hookRes.mainHook) {
+        applyServerHook(hookRes.mainHook);
+      }
     }
 
     var bootRes = await authorizedCall("/api/v1/session/bootstrap", {
